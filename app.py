@@ -1,17 +1,15 @@
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, session
 from werkzeug.security import generate_password_hash, check_password_hash
 import os
-from datetime import datetime, timedelta
 
-# Ensure this matches your filename exactly: model.py
+# Connects to your model.py schema
 from model import db, User, Restaurant, MenuItem, CartItem, Order
 
 app = Flask(__name__)
 app.secret_key = 'upskill_internship_secret_key'
 
-# --- VERCEL / LOCAL CONFIG ---
+# --- CONFIGURATION ---
 basedir = os.path.abspath(os.path.dirname(__file__))
-
 if os.environ.get('VERCEL'):
     db_path = '/tmp/food_delivery.db'
 else:
@@ -22,12 +20,10 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db.init_app(app)
 
-# Initialize tables
 with app.app_context():
     db.create_all()
 
-# --- AUTH ROUTES ---
-
+# --- AUTHENTICATION ---
 @app.route('/')
 def index():
     if 'user_id' in session:
@@ -52,13 +48,9 @@ def login():
         session['user_name'] = user.name
         session['role'] = user.role
         
-        # REDIRECTION LOGIC FOR ALL ROLES
-        if user.role == 'restaurant':
-            return redirect(url_for('dashboard'))
-        elif user.role == 'driver':
-            return redirect(url_for('driver_dashboard'))
-        else:
-            return redirect(url_for('explore'))
+        if user.role == 'restaurant': return redirect(url_for('dashboard'))
+        if user.role == 'driver': return redirect(url_for('driver_dashboard'))
+        return redirect(url_for('explore'))
             
     flash("Invalid credentials", "danger")
     return redirect(url_for('login_page'))
@@ -78,11 +70,10 @@ def register():
     new_user = User(name=name, email=email, password_hash=hashed_pw, role=role)
     db.session.add(new_user)
     db.session.commit()
-    flash("Success! Please login.", "success")
+    flash("Registration successful! Please login.", "success")
     return redirect(url_for('login_page'))
 
-# --- RESTAURANT ROUTES ---
-
+# --- RESTAURANT MODULE ---
 @app.route('/dashboard')
 def dashboard():
     if 'user_id' not in session or session.get('role') != 'restaurant':
@@ -96,13 +87,45 @@ def dashboard():
     items = MenuItem.query.filter_by(restaurant_id=restaurant.id).all()
     return render_template('dashboard.html', restaurant=restaurant, items=items)
 
-# --- CUSTOMER ROUTES ---
+@app.route('/add_item', methods=['POST'])
+def add_item():
+    if 'user_id' not in session or session.get('role') != 'restaurant': return redirect(url_for('login_page'))
+    new_item = MenuItem(
+        restaurant_id=request.form.get('restaurant_id'),
+        dish_name=request.form.get('dish_name'),
+        price=float(request.form.get('price')),
+        description=request.form.get('description')
+    )
+    db.session.add(new_item)
+    db.session.commit()
+    return redirect(url_for('dashboard'))
 
+# --- CUSTOMER & CART MODULE ---
 @app.route('/explore')
 def explore():
     if 'user_id' not in session: return redirect(url_for('login_page'))
     restaurants = Restaurant.query.all()
     return render_template('customer_home.html', restaurants=restaurants)
+
+@app.route('/restaurant/<int:restaurant_id>')
+def view_menu(restaurant_id):
+    if 'user_id' not in session: return redirect(url_for('login_page'))
+    restaurant = Restaurant.query.get_or_404(restaurant_id)
+    items = MenuItem.query.filter_by(restaurant_id=restaurant_id).all()
+    return render_template('restaurant_menu.html', restaurant=restaurant, items=items)
+
+@app.route('/add_to_cart/<int:item_id>', methods=['POST'])
+def add_to_cart(item_id):
+    if 'user_id' not in session: return redirect(url_for('login_page'))
+    user_id = session.get('user_id')
+    cart_item = CartItem.query.filter_by(user_id=user_id, menu_item_id=item_id).first()
+    if cart_item:
+        cart_item.quantity += 1
+    else:
+        cart_item = CartItem(user_id=user_id, menu_item_id=item_id, quantity=1)
+        db.session.add(cart_item)
+    db.session.commit()
+    return redirect(request.referrer)
 
 @app.route('/cart')
 def view_cart():
@@ -118,7 +141,6 @@ def checkout():
     cart_items = CartItem.query.filter_by(user_id=user_id).all()
     if not cart_items: return redirect(url_for('explore'))
 
-    # Group items by restaurant (simplified to first restaurant for now)
     first_item = MenuItem.query.get(cart_items[0].menu_item_id)
     total = sum(MenuItem.query.get(i.menu_item_id).price * i.quantity for i in cart_items)
 
@@ -127,7 +149,7 @@ def checkout():
         restaurant_id=first_item.restaurant_id,
         total_amount=total,
         status='Preparing',
-        eta='30-45 mins'
+        eta='25 mins'
     )
     db.session.add(new_order)
     CartItem.query.filter_by(user_id=user_id).delete()
@@ -140,13 +162,11 @@ def track_orders():
     orders = Order.query.filter_by(customer_id=session.get('user_id')).order_by(Order.id.desc()).all()
     return render_template('track_orders.html', orders=orders)
 
-# --- DRIVER ROUTES ---
-
+# --- DRIVER MODULE ---
 @app.route('/driver_dashboard')
 def driver_dashboard():
     if 'user_id' not in session or session.get('role') != 'driver':
         return redirect(url_for('login_page'))
-    
     available_orders = Order.query.filter_by(status='Preparing').all()
     my_orders = Order.query.filter_by(driver_id=session.get('user_id')).all()
     return render_template('driver_dashboard.html', available=available_orders, mine=my_orders)
@@ -156,7 +176,7 @@ def accept_order(order_id):
     order = Order.query.get_or_404(order_id)
     order.driver_id = session.get('user_id')
     order.status = 'Out for Delivery'
-    order.eta = '15 mins'
+    order.eta = '10 mins'
     db.session.commit()
     return redirect(url_for('driver_dashboard'))
 
